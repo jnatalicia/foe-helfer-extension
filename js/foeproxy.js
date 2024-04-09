@@ -28,7 +28,7 @@ const FoEproxy = (function () {
 	/** @type {Record<string, undefined|Record<string, undefined|((data: FoE_NETWORK_TYPE, postData: any) => void)[]>>} */
 	const proxyMap = {};
 	const proxyRequestsMap = {};
-
+	
 	/** @type {Record<string, undefined|((data: any, requestData: any) => void)[]>} */
 	const proxyMetaMap = {};
 
@@ -42,7 +42,6 @@ const FoEproxy = (function () {
 	// startup Queues
 	let xhrQueue = [];
 	let wsQueue = [];
-
 	const proxy = {
 		/**
 		 * Fügt einen datenhandler für Antworten von game/json hinzu.
@@ -212,8 +211,7 @@ const FoEproxy = (function () {
 			wsRawHandler = wsRawHandler.filter(c => c !== callback);
 		},
 
-		pushFoeHelperMessage: function (method, data = null) {
-			_proxyWsAction('FoeHelperService', method, data);
+		triggerFoeHelperHandler: function (method, data = null) {
 			_proxyWsAction('FoeHelperService', method, data);
 		},
 	
@@ -267,13 +265,18 @@ const FoEproxy = (function () {
 	};
 
 	window.addEventListener('foe-helper#loaded', () => {
-		const xhrQ = xhrQueue;
+		while (xhrQueue.length > 0) {
+			let xhrRequest = xhrQueue.shift()
+			xhrOnLoadHandlerExec.call(xhrRequest)
+		}
 		xhrQueue = null;
-		const wsQ = wsQueue;
+
+		while (wsQueue.length > 0) {
+			let wsMessage = wsQueue.shift()
+			wsMessageHandlerExec(wsMessage)
+		}
 		wsQueue = null;
 
-		xhrQ.forEach(xhrRequest => xhrOnLoadHandler.call(xhrRequest));
-		wsQ.forEach(wsMessage => wsMessageHandler(wsMessage));
 	}, { capture: false, once: true, passive: true });
 
 	window.addEventListener('foe-helper#error-loading', () => {
@@ -331,6 +334,9 @@ const FoEproxy = (function () {
 			wsQueue.push(evt);
 			return;
 		}
+		wsMessageHandlerExec(evt);
+	}
+	function wsMessageHandlerExec(evt) {
 		try {
 			if (evt.data === 'PONG') return;
 			/** @type {FoE_NETWORK_TYPE[]|FoE_NETWORK_TYPE} */
@@ -358,7 +364,7 @@ const FoEproxy = (function () {
 		}
 	}
 
-	// Achtung! Die WebSocket.prototype.send funktion wird nicht zurück ersetzt, falls anderer code den prototypen auch austauscht.
+	// Attention. The WebSocket.prototype.send function is not replaced back if other code also replaces the prototype
 	const observedWebsockets = new WeakSet();
 	const oldWSSend = WebSocket.prototype.send;
 	WebSocket.prototype.send = function (data) {
@@ -467,7 +473,9 @@ const FoEproxy = (function () {
 			xhrQueue.push(this);
 			return;
 		}
-
+		xhrOnLoadHandlerExec.call(this);
+	 }
+	 function xhrOnLoadHandlerExec() {
 		const requestData = getRequestData(this);
 		const url = requestData.url;
 		const postData = requestData.postData;
@@ -527,7 +535,7 @@ const FoEproxy = (function () {
 				}
 
 			} catch (e) {
-				console.log('Can\'t parse postData: ', postData);
+				console.log('Can\'t parse postData: ', postData, e);
 			}
 
 		}
@@ -537,12 +545,40 @@ const FoEproxy = (function () {
 		if (!proxyEnabled ) return;
 		if (!data) return;
 		try {
-			const post = JSON.parse(new TextDecoder().decode(data))[0];
+			
+			let posts=[];
+
+			if (typeof data === 'object' && data instanceof ArrayBuffer) {
+				if (data.bytes[0] === 31 && data.bytes[1] === 139 && data.bytes[2] === 8) {
+					// gzipped, ignore
+					return
+				} else {
+					// try plaintext
+					posts = JSON.parse(new TextDecoder().decode(data));
+				}
+			} else if (typeof data === 'object' && data instanceof Uint8Array) {
+				if (data[0] === 31 && data[1] === 139 && data[2] === 8) {
+					// gzipped, ignore
+					return
+				} else {
+					// try plaintext
+					posts = JSON.parse(new TextDecoder().decode(data));
+				}
+			} else
+				posts = JSON.parse(data);
+
 			//console.log(post);
-			if (!post || !post.requestClass || !post.requestMethod || !post.requestData) return;
-			proxyRequestAction(post.requestClass, post.requestMethod, post);
+			if (!(posts instanceof Array)) {
+				// ignore (probably) game-unrelated request
+				return;
+			}
+
+			for (let post of posts) {
+				if (!post || !post.requestClass || !post.requestMethod || !post.requestData) return;
+				proxyRequestAction(post.requestClass, post.requestMethod, post);
+			}
 		} catch (e) {
-			console.log('Can\'t parse postData: ', data);
+			console.log('Can\'t parse postData: ', data, e);
 		}
 	}
 
